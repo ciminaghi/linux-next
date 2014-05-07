@@ -1,0 +1,7 @@
+menuconfig MCUIO
+	tristate "mcuio drivers"
+	help
+	  MCUIO is a protocol and a set of drivers which let a Linux MPU
+	  (MPU = MicroProcessor Unit) control an MCU's peripherals
+	  (MCU = Micro Controller Unit, some kind of tiny microcontroller
+	  running a tiny OS or no OS at all).

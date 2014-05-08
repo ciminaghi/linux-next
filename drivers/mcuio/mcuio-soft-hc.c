@@ -205,6 +205,18 @@ static struct mcuio_device_id default_soft_hc_id = {
 	.class = MCUIO_CLASS_SOFT_HOST_CONTROLLER,
 };
 
+static void mcuio_soft_hc_release(struct device *device)
+{
+	struct mcuio_device *mdev = to_mcuio_dev(device);
+	struct mcuio_soft_hc *shc = mdev->do_request_data;
+
+	irq_set_handler(shc->irqno, NULL);
+	irq_set_chip(shc->irqno, NULL);
+	irq_free_desc(shc->irqno);
+	kfree(shc);
+	mcuio_hc_dev_default_release(device);
+}
+
 struct device *mcuio_add_soft_hc(struct mcuio_device_id *id,
 				 const struct mcuio_soft_hc_ops *ops,
 				 void *priv)
@@ -213,7 +225,8 @@ struct device *mcuio_add_soft_hc(struct mcuio_device_id *id,
 	if (!shc)
 		return ERR_PTR(-ENOMEM);
 	return mcuio_add_hc_device(id ? id : &default_soft_hc_id,
-				   mcuio_soft_hc_do_request, shc);
+				   mcuio_soft_hc_do_request, shc,
+				   mcuio_soft_hc_release);
 }
 EXPORT_SYMBOL(mcuio_add_soft_hc);
 

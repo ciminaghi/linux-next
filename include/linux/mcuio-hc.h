@@ -31,8 +31,30 @@
  * @id: pointer to mcuio device's id
  * @rf: pointer to request function.
  * @data: data passed to rf callback.
+ * @release: pointer to release function
  */
 struct device *mcuio_add_hc_device(struct mcuio_device_id *id, rfun rf,
-				   void *data);
+				   void *data,
+				   void (*release)(struct device *));
+
+/*
+ * mcuio_del_hc_device(): remove host controller device
+ *
+ * @dev: pointer to relevant struct device
+ */
+void mcuio_del_hc_device(struct device *);
+
+/*
+ * mcuio_hc_dev_default_release(): default release for hc devices
+ *
+ * @dev: pointer to corresponding device to be deleted
+ *
+ * If an hc is created with custom release function, such function can
+ * invoke mcuio_hc_dev_default_release() to perform some common release
+ * operations (freeing memory and releasing the mcuio bus number)
+ */
+void mcuio_hc_dev_default_release(struct device *dev);
+
+
 
 #endif /* __HOST_CONTROLLER_H__ */

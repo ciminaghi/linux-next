@@ -14,6 +14,7 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/regmap.h>
+#include <linux/interrupt.h>
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
 #include <linux/mutex.h>
@@ -40,6 +41,9 @@ struct mcuio_hc_data {
 	struct kthread_worker tx_kworker;
 	struct task_struct *tx_kworker_task;
 	struct kthread_work send_messages;
+
+	struct task_struct *rx_thread;
+	wait_queue_head_t rd_wq;
 };
 
 typedef int (*mcuio_copy)(uint32_t *dts, const uint32_t *src, int length,
@@ -207,6 +211,181 @@ regmap_error:
 	return -EIO;
 }
 
+static irqreturn_t hc_irq_handler(int irq, void *__data)
+{
+	struct mcuio_device *mdev = __data;
+	struct regmap *map = dev_get_regmap(&mdev->dev, NULL);
+	struct mcuio_hc_data *data = dev_get_drvdata(&mdev->dev);
+	int ret;
+	u32 status;
+
+	if (!data) {
+		dev_err(&mdev->dev, "no drv data in irq handler\n");
+		return IRQ_NONE;
+	}
+	ret = regmap_read(map, MCUIO_IRQ_STAT, &status);
+	if (ret < 0)
+		return IRQ_NONE;
+	if (status & RX_RDY)
+		wake_up_interruptible(&data->rd_wq);
+	ret = regmap_write(map, MCUIO_IRQ_CLR, status);
+	if (ret < 0)
+		dev_err(&mdev->dev, "error clearing irq flag\n");
+	return IRQ_HANDLED;
+}
+
+static inline u32 __get_available(struct regmap *map)
+{
+	u32 out;
+	int stat = regmap_read(map, MCUIO_RX_CNT, &out);
+	if (stat < 0)
+		return 0;
+	return out;
+}
+
+static int __read_from_hc(struct mcuio_device *hc, void *out, int count)
+{
+	int stat;
+	struct mcuio_hc_data *data = dev_get_drvdata(&hc->dev);
+	struct regmap *map;
+
+	if (!data) {
+		WARN_ON(1);
+		return -EINVAL;
+	}
+	map = dev_get_regmap(&hc->dev, NULL);
+	if (!map) {
+		WARN_ON(1);
+		return -ENODEV;
+	}
+
+	stat = wait_event_interruptible(data->rd_wq,
+					__get_available(map) >= count ||
+					kthread_should_stop());
+	/* FIXME: handle signals */
+	if (stat < 0 || kthread_should_stop()) {
+		if (stat < 0)
+			dev_err(&hc->dev, "error %d in wait_event\n",
+				stat);
+		return stat;
+	}
+	return regmap_raw_read(map, MCUIO_HC_INBUF, out, count);
+}
+
+static int __read_base_packet(struct mcuio_device *hc,
+			      struct mcuio_base_packet *p)
+{
+	return __read_from_hc(hc, p, sizeof(*p));
+}
+
+static int __finish_reading_packet(struct mcuio_device *hc,
+				   struct mcuio_base_packet *p,
+				   struct mcuio_request *r)
+{
+	int size, stat;
+
+	if (!mcuio_packet_is_extended(p))
+		return 0;
+	if (r && (!r->extended_datalen || !r->extended_data)) {
+		WARN_ON(1);
+		return -ENOMEM;
+	}
+	/* First subframe has already been read */
+	size = (mcuio_packet_nsub(p) - 1) * sizeof(*p);
+	if (!size) {
+		WARN_ON(1);
+		return -EINVAL;
+	}
+	if (size < 0) {
+		dev_err(&hc->dev, "invalid packet size\n");
+		return -EINVAL;
+	}
+	if (!r) {
+		int i;
+		struct mcuio_base_packet __p;
+
+		/* Just throw away current packet */
+		for (i = 0; i < mcuio_packet_nsub(p) - 1; i++) {
+			stat = __read_from_hc(hc, &__p, sizeof(__p));
+			if (stat < 0)
+				dev_err(&hc->dev, "throwing away packet\n");
+		}
+
+	}
+	/* FIXME: CHECK CRC */
+	return __read_from_hc(hc, r->extended_data + FIRST_SUBF_DLEN, size);
+}
+
+static struct mcuio_request *__find_request(struct mcuio_device *hc,
+					    struct mcuio_base_packet *p)
+{
+	struct mcuio_request *r;
+	struct mcuio_hc_data *data = dev_get_drvdata(&hc->dev);
+
+	mutex_lock(&data->lock);
+	list_for_each_entry(r, &data->pending_requests, list) {
+		if ((mcuio_packet_type(p) & mcuio_actual_type_mask) ==
+		    (r->type & mcuio_actual_type_mask) &&
+		    mcuio_packet_dev(p) == r->mdev->device &&
+		    mcuio_packet_func(p) == r->mdev->fn &&
+		    mcuio_packet_offset(p) == r->offset) {
+			mutex_unlock(&data->lock);
+			return r;
+		}
+	}
+	mutex_unlock(&data->lock);
+	return NULL;
+}
+
+static int __receive_messages(void *__data)
+{
+	struct mcuio_device *hc = __data;
+
+	while (!kthread_should_stop()) {
+		struct mcuio_base_packet p;
+		struct mcuio_request *r;
+		int stat;
+
+		/*
+		 * Just read a base packet, which could be the first
+		 * subframe of an extended packet
+		 */
+		stat = __read_base_packet(hc, &p);
+		if (stat) {
+			schedule();
+			continue;
+		}
+		if (!mcuio_packet_is_reply(&p)) {
+			/*
+			  Packet is a request, we do not handle requests at
+			  the moment
+			*/
+			__finish_reading_packet(hc, &p, NULL);
+			continue;
+		}
+		r = __find_request(hc, &p);
+		if (!r) {
+			dev_err(&hc->dev, "unexpected reply");
+			__finish_reading_packet(hc, &p, NULL);
+			continue;
+		}
+		r->status = mcuio_packet_is_error(&p);
+		cancel_delayed_work_sync(&r->to_work);
+		if (mcuio_packet_is_read(&p)) {
+			__copy_data(r, &p, 1);
+			if (mcuio_packet_is_extended(&p)) {
+				stat = __finish_reading_packet(hc, &p, r);
+				if (stat)
+					r->status = stat;
+			}
+		}
+		if (r->cb)
+			r->cb(r);
+		mcuio_free_request(r);
+	}
+	return 0;
+}
+
 static void __send_messages(struct kthread_work *work)
 {
 	struct mcuio_hc_data *data =
@@ -271,7 +450,7 @@ static int __mcuio_submit_remote_request(struct mcuio_request *r, void *dummy)
 static const struct regmap_config mcuio_hc_regmap_config = {
 	.reg_bits = 32,
 	.val_bits = 32,
-	.max_register = 0xc,
+	.max_register = MCUIO_HC_MAX_REGISTER,
 	.cache_type = REGCACHE_NONE,
 };
 
@@ -279,6 +458,7 @@ static int mcuio_host_controller_probe(struct mcuio_device *mdev)
 {
 	struct mcuio_hc_data *data;
 	struct regmap *map;
+	u32 irq;
 	int ret = -ENOMEM;
 
 	/* Only manage local host controllers */
@@ -296,6 +476,20 @@ static int mcuio_host_controller_probe(struct mcuio_device *mdev)
 	atomic_set(&data->removing, 0);
 	mutex_init(&data->lock);
 	init_kthread_worker(&data->tx_kworker);
+	init_waitqueue_head(&data->rd_wq);
+	ret = regmap_read(map, MCUIO_IRQ, &irq);
+	if (ret < 0) {
+		dev_err(&mdev->dev, "Error %d reading irq number\n", ret);
+		return ret;
+	}
+	ret = devm_request_threaded_irq(&mdev->dev, irq, NULL,
+					hc_irq_handler,
+					IRQF_ONESHOT,
+					dev_name(&mdev->dev), mdev);
+	if (ret < 0) {
+		dev_err(&mdev->dev, "Error %d requesting irq\n", ret);
+		return ret;
+	}
 	data->tx_kworker_task = kthread_run(kthread_worker_fn,
 					    &data->tx_kworker,
 					    "%s_%s",
@@ -307,6 +501,13 @@ static int mcuio_host_controller_probe(struct mcuio_device *mdev)
 	init_kthread_work(&data->send_messages, __send_messages);
 	INIT_LIST_HEAD(&data->request_queue);
 	INIT_LIST_HEAD(&data->pending_requests);
+	data->rx_thread = kthread_run(__receive_messages, mdev, "%s_%s",
+				      dev_name(&mdev->dev), "rx");
+	if (IS_ERR(data->rx_thread)) {
+		dev_err(&mdev->dev, "failed to create message rx task\n");
+		kthread_stop(data->tx_kworker_task);
+		return PTR_ERR(data->rx_thread);
+	}
 	dev_set_drvdata(&mdev->dev, data);
 	return 0;
 }

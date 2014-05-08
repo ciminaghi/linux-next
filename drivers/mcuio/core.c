@@ -33,6 +33,20 @@ static void __exit mcuio_exit(void)
 	return;
 }
 
+int mcuio_submit_request(struct mcuio_request *r)
+{
+	if (!r->mdev) {
+		WARN_ON(1);
+		return -ENODEV;
+	}
+	if (!r->mdev->do_request) {
+		dev_err(&r->mdev->dev, "cannot execute request\n");
+		return -EOPNOTSUPP;
+	}
+	return r->mdev->do_request(r, r->mdev->do_request_data);
+}
+EXPORT_SYMBOL(mcuio_submit_request);
+
 postcore_initcall(mcuio_init);
 module_exit(mcuio_exit);
 

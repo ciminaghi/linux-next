@@ -108,14 +108,9 @@ struct mcuio_request {
 /*
  * Submit a request, block until request done
  *
- * Shall be implemented later on, return error at the moment
- *
  * @r: pointer to request
  */
-static inline int mcuio_submit_request(struct mcuio_request *r)
-{
-	return -EOPNOTSUPP;
-}
+int mcuio_submit_request(struct mcuio_request *r);
 
 
 #endif /* __KERNEL__ */

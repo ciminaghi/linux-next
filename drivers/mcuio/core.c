@@ -13,11 +13,42 @@
 #include <linux/device.h>
 #include <linux/slab.h>
 #include <linux/mcuio.h>
+#include <linux/completion.h>
+#include <linux/spinlock.h>
+#include <linux/bitops.h>
 #include "mcuio-internal.h"
+
+unsigned long int busnum;
+spinlock_t busnum_lock;
+
+int mcuio_get_bus(void)
+{
+	int out;
+	spin_lock(&busnum_lock);
+	if (busnum == 0xffffffff) {
+		out = -ENOMEM;
+		goto end;
+	}
+	out = find_last_bit(&busnum, sizeof(busnum));
+	if (out == sizeof(busnum))
+		out = 0;
+	set_bit(out, &busnum);
+end:
+	spin_unlock(&busnum_lock);
+	return out;
+}
+EXPORT_SYMBOL(mcuio_get_bus);
+
+void mcuio_put_bus(unsigned n)
+{
+	clear_bit(n, &busnum);
+}
+EXPORT_SYMBOL(mcuio_put_bus);
 
 static int __init mcuio_init(void)
 {
 	int ret;
+	spin_lock_init(&busnum_lock);
 	ret = device_register(&mcuio_bus);
 	if (ret)
 		return ret;

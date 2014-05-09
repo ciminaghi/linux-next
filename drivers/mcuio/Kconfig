@@ -14,3 +14,11 @@ config MCUIO_LDISC_HC
 	help
 	  This adds a line-discipline based MCUIO host controller, which is
 	  the only host controller at present. Say Y if in doubt.
+
+config MCUIO_IRQ_CTRL
+        tristate "mcuio irq controller driver"
+	depends on MCUIO
+	default y
+	help
+	  The MCUIO irq controller is needed by mcuio functions to send
+	  interrupts to the MPU. If unsure say yes.

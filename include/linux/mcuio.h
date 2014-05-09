@@ -31,6 +31,7 @@ typedef int (*rfun)(struct mcuio_request *, void *data);
  * @do_request: pointer to request processing function (sends request through
  * host controller for remote devices or executes request for local devices)
  * @do_request_data: pointer to private data passed to do_request callback
+ * @irq: irq number for device
  */
 struct mcuio_device {
 	struct mcuio_device_id id;
@@ -38,6 +39,7 @@ struct mcuio_device {
 	struct device dev;
 	rfun do_request;
 	void *do_request_data;
+	int irq;
 };
 
 #define to_mcuio_dev(_dev) container_of(_dev, struct mcuio_device, dev)

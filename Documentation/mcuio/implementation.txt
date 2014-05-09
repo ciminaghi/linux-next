@@ -1,0 +1,147 @@
+*** OVERVIEW ***
+
+This document briefly describes the mcuio subsystem implementation under Linux.
+As one can expect, a specific bus (the mcuio bus) has been introduced.
+
+
+*** DEVICE IDS ***
+
+All mcuio devices are identified by an 8 bytes data structure (the device
+descriptor located at the beginning of the device's memory area, see
+protocol.txt in this directory). Such descriptor corresponds to a
+struct mcuio_device_id, which is defined as follows:
+
+struct mcuio_device_id {
+	unsigned int device;
+	unsigned int vendor;
+	unsigned int class;
+	unsigned int class_mask;
+};
+
+The class_mask field is actually unused for devices, while it is useful for
+the bus layer for matching devices and drivers.
+
+
+
+*** DEVICE INSTANTIATION ***
+
+An mcuio device can be instantiated by calling mcuio_device_register():
+
+int mcuio_device_register(struct mcuio_device *dev,
+			  struct device_type *type,
+			  struct device *parent);
+
+where type can be NULL, in which case a default device_type is used.
+Custom device types can be specified in case special attributes or a custom
+release method is needed for a specific device.
+At the moment, default device attributes are the following [all of them are
+read only]:
+
+	* device : see field device in struct mcuio_device_id.
+	* vendor : see field vendor in struct mcuio_device_id.
+	* class : see field class in struct mcuio_device_id.
+	* bus : index of bus on which the device lives.
+	* dev : index of MCU on which the device lives.
+	* func: index of function corresponding to the device.
+
+
+
+*** DRIVERS ***
+
+An mcuio driver is represented by the following structure:
+
+struct mcuio_driver {
+	const struct mcuio_device_id	*id_table;
+	int (*probe)(struct mcuio_device *dev);
+	int (*remove)(struct mcuio_device *dev);
+	struct device_driver		driver;
+};
+
+where id_table is an array of device ids used by the bus layer to do
+device-driver matching. In particular, a driver is considered to match a device
+when:
+
+      * Its vendor & device id match those of the device.
+
+      OR
+
+      * The result of a bitwise AND between its class and class_mask
+        matches the class of the device.
+
+The id_table shall be terminated by an entry with null device id and class
+fields.
+An mcuio driver can be registered via mcuio_driver_register():
+
+int mcuio_driver_register(struct mcuio_driver *drv, struct module *owner);
+
+As usual, when a device is instantiated and a matching driver is found, the
+probe() method of the driver is invoked. The driver's probe() function shall
+return 0 if the driver can actually control the device, a negative value
+otherwise.
+
+
+
+*** ACCESSING MCUIO DEVICES ***
+
+The regmap abstraction has been used to access mcuio devices.
+Accesses to registers of a device's virtual memory map are translated into
+mcuio transactions on the specific physical layer.
+A specific regmap bus (regmap-mcuio) has been implemented (see file
+regmap-mcuio.c in the source code).
+Reads/Writes from/to mcuio devices are of course potentially blocking.
+
+
+
+*** HOST CONTROLLERS ***
+
+At present, there is no native "hardware" implementation of the mcuio protocol,
+so the host controller is actually some other kind of device, and everything
+is actually performed in software. For this reason, existing controllers
+(actually just one, the line discipline based controller, see below) are called
+soft-controllers, although an attempt was made to make them look like real
+hardware (they can even issue interrupts). This was done to give the user
+the same mechanism for interacting with mcuio devices, both actual and
+virtual ("soft").
+
+As stated in protocol.txt, an host controller is an mcuio device living on
+the MPU. Its memory map is the following:
+
+ Symbolic name  | offset  |  meaning
+----------------+---------+--------------------------
+MCUIO_HC_OUTBUF | 0x8     |  output fifo area
+MCUIO_HC_INBUF  | 0x108   |  input fifo area
+MCUIO_RX_CNT    | 0x208   |  counter of u32 words in input fifo
+MCUIO_IRQ       | 0x20c   |  contains the host controller's irq number
+MCUIO_IRQ_STAT  | 0x210   |  status register (bit 0 is set on rx ready)
+MCUIO_IRQ_CLR   | 0x214   |  write to this register to clear irq status bits
+
+The output FIFO area is just a FIFO: any u32 written to any address belonging
+to this area is actually stored into an output buffer. A packet is sent
+through the physical layer as soon as the output FIFO contains at least an
+mcuio packet.
+Similarly, data coming from the MCU are stored into a buffer and can be
+read throught the Input FIFO area.
+Since the host controller is local to the MPU, it has to be be accessed via a
+special no_bus regmap.
+The MCUIO_RX_CNT register contains the number of u32 words presently stored
+in the input fifo.
+The MCUIO_IRQ register contains the controller's irq line number.
+TODO: define and IRQ ENABLE register (presently the irq is __always__ enabled).
+
+Each host controller in the MPU has three associated kernel threads:
+
+     * rx: this thread cyclically calls regmap_read() on the host
+     controller's input FIFO area.
+     * tx: this thread is awakened when an output packet must be sent
+     to an MCU function.
+     * enum: this thread controls the enumeration process.
+
+Requests from MCUs are not handled at present.
+
+
+*** THE LINE DISCIPLINE HOST CONTROLLER ***
+
+This host controller is based on a line discipline, and can be associated to
+any terminal (or pseudo-terminal).
+This is used to get the mcuio protocol to work over an rs232 connection, and
+even over a socket (see tests.txt in this directory).

@@ -1,0 +1,54 @@
+
++----------------------------+ 0x8
+|      Port name             |     Symbolic name of gpio port.
++----------------------------+ 0xc
+|       number of gpios (n)  |     number of available gpios, max 64 (per func)
++----------------------------+ 0x10
+|	gpio0_label	     |	   label of gpio0 (max 4 bytes, str) (*)
++----------------------------+ 0x14
+|	gpio1_label	     |     label of gpio1 (max 4 bytes, str) (*)
++----------------------------+ 0x18
+|			     |
+|      ................      |
+|			     |
++----------------------------+ 0x10c
+|	gpio63_label         |     label of gpio63 (max 4 bytes, str) (*)
++----------------------------+ 0x110
+| mask for available gpio    |	   8 bits per gpio:
+| modes, gpios 0..7  	     |     00000000 -> unavailable
+|                            |	   00000001 -> input
+|                            |	   00000010 -> output
+|                            |     00000100 -> open drain
+| 			     |	   00001000 -> pull-up
+|			     |	   00010000 -> pull-down
+| 			     |     [ bits 5 - 7 are spare ]
+|			     |
++----------------------------+ 0x310
+| mask for available gpio    |	   8 bits per gpio:
+| event modes		     |	   00000001 -> rising edge
+| 			     |	   00000010 -> falling edge
+|			     |	   10000000 -> enable (bit 7 = 0 disables)
+|			     |     [ bits 2 - 6 are spare ]
+|			     |
++----------------------------+ 0x510
+| actual gpio modes	     |     (0 means disabled, maybe available to some
+| 	      		     |      other function).
++----------------------------+ 0x710
+| mask for actual gpio       |     8 bits per gpio
+| events   	     	     |
++----------------------------+ 0x910
+| gpio data		     |     current gpio status/output values (R/W)
+|      			     |
++----------------------------+ 0x918
+| gpio set                   |	   gpio set (gpio is set if corresponding bit
+|      			     |	   is set), write only
++----------------------------+ 0x920
+| gpio clear                 |	   gpio clr (gpio is cleared if corresponding
+|      			     |	   bit is set), write only
++----------------------------+ 0x928
+| gpio events status	     |	   1bit per gpio (1 -> event has been
+|			     |	   triggered).
++----------------------------+ 0x930
+
+(*) gpio labels are strings of max 4 chars. If shorter than 4 bytes, strings
+are 0 terminated.

@@ -1,0 +1,341 @@
+*** SYSTEM OVERVIEW ***
+
+A typical use case for the mcuio protocol is shown in the following diagram:
+
+
++---------------+      	    +------------+
+|		|   PHY     |		 |
+|      MPU     	|<--------->|    MCU	 |
+|      		|	    |	 	 |
++---------------+	    +------------+
+
+where:
+
+* MPU (MicroProcessor Unit) indicates a microprocessor based system, with
+(relatively) large memory and a full fledged operating system (Linux is the
+only supported OS at present).
+
+* MCU (MicroController Unit) indicates a microcontroller based system, with
+some 10s-100s KBytes RAM and a very simple os. Typical modern microcontrollers
+are equipped with many peripherals, such as GPIOs, A/Ds, D/As, PWM channels,
+Input capture/Output compare channels and so on.
+
+* PHY is any popular physical communication link, such as rs232, i2c, spi, ...
+
+The goal of the mcuio overall system is getting the MPU to easily control the
+MCU's peripherals. On the MCU side, a single device will be instantiated for
+each MCU's function.
+
+
+*** PROTOCOL OVERVIEW ***
+
+The protocol is as simple as possible: it just allows to read or write memory
+locations (bytes, words, dwords).
+Two frame types have been specified: basic and extended.
+
+
+** BASIC FRAMES
+
+Basic frames have fixed size (16 bytes) with the following format:
+
+
+  1   1   1     1     2             8         2
+  8   8   8   3   5   16           64         16
++---+---+---+---+---+------+---------------+-------+
+| S1|S2 | t | d | f |offset|    data       | crc16 |
++---+---+---+---+---+------+---------------+-------+
+
+where:
+
+	* S1 = 0x55 (sync char 1)
+	* S2 = 0xaa (sync char 2)
+	* t = type (see below)
+	* d = destination device
+	* f = destination function
+	* offset = offset within selected function's map
+	* data = message data
+	* crc16 = crc16 computed over fields t ... data
+
+Type can be:
+
+        00000000 -> read byte
+	00000001 -> write byte
+	00000010 -> read word
+	00000011 -> write word
+	00000100 -> read dword
+	00000101 -> write dword
+	00000110 -> reserved
+	00000111 -> reserved
+	01000000 -> read byte reply (OK)
+	....
+	01000111 -> reserved
+	01100000 -> read byte reply (ERROR)
+	....
+	01100111 -> reserved
+	1XXXXXXX -> fill data bit (see below)
+
+When bit 7 of type is 0, only one object is read/written
+(byte, word, dword, quad).
+When bit 7 of type is set (fill_data bit), data[] is filled with as many
+objects as possible (8 bytes, 4 words, 2 dwords). This is to save
+bandwith and avoid problems in case of different endianness between MPU and
+MCU
+
+An address is made of the following fields:
+
+   * dev (0 .. 7): in case the phy link is actually a bus, this field selects
+   the node we want to talk to.
+   * function (0 .. 31): this field selects one of the peripheral modules on
+   the MPU (each peripheral is called a "function", with a pci-like term).
+   * offset (0 .. 4095): each MPU peripheral is assigned a "virtual" memory
+   space. This field contains the offset at which the specified read or
+   write operation will be done. Standard mcuio devices only decode addresses
+   from 0 to 4095 (12 bits), bits 13 .. 15 are reserved (see companion devices
+   below).
+
+
+** EXTENDED FRAMES
+
+The following two type values:
+
+     00000111
+     01000110
+
+respectively indicate a write many bytes request and a read many bytes reply.
+This kind of frames is made of an integer number of 16 bytes sub-frames,
+the first of which contains the usual header followed by 2 bytes indicating
+the number of bytes read or to be written and by the first 8 data bytes:
+
+
+  1   1   1     1     2        2         8
+  8   8   8   3   5   16      16        64
++---+---+---+---+---+------+-------+---------------+
+| S1|S2 | t | d | f |offset|  len  |  data 0..7    |
++---+---+---+---+---+------+-------+---------------+
+     
+
+The following subframes up to the last minus one are just made of data:
+
++--------------------------------------------------+
+|                     data                         |
++--------------------------------------------------+
+
+The final sub-frame is made of data up to the requested length and the
+usual crc16 at the end:
+
++------------------------+----------------+--------+
+|        data            |     [pad]      |  crc16 |
++------------------------+----------------+--------+
+
+Since all subframes are 16 bytes long, the final subframe could contain
+some padding bytes (0x00) to reach the requested length.
+
+
+** REQUEST/REPLY EXCHANGE
+
+Each request frame shall have a reply.
+The first data dword of a reply contains an error code (0 means success,
+negative values mean error, see below for error codes table).
+
+CODE  |  ERROR
+------+--------------------------
+-1    | operation not permitted
+------+--------------------------
+-12   |  not enough memory
+------+--------------------------
+TBD   | TBD
+
+
+** ENDIANNESS
+
+Protocol endianness is LITTLE. This choice has been made to make life easier
+on MCUs, which are often little endian ARM machines.
+
+** MESSAGE QUEUES
+
+An mcuio device is not required to implement any request queue: each request
+to a device must be followed by a reply, no other request is allowed before a
+reply is sent by the target function or a timer expires. Actual reply tiemouts
+are PHY specific.
+
+*** FUNCTIONS MEMORY MAPS ***
+
+As stated in the previous paragraph, every function has a 12 bits memory space,
+the leading 8 bytes of which always contain a descriptor with the following
+[mandatory] format:
+
+   	  16 bits         16 bits
+   +-----------------+-------------+ 0
+   |    vendor       |   device id |
+   +-----------------+------+------+ 4
+   |	 class code  (24)   | rev  |
+   +------------------------+------+ 8
+   |				   |
+   |				   |
+   |				   |
+   +-------------------------------+ 0x0fff
+MSB				   LSB
+
+[ yes, this also resembles a pci header ].
+The following class codes have been defined at present:
+
+------------------+--------------
+	 CLASS	  |   CODE
+------------------+--------------
+ HOST CONTROLLER  |  0x000001
+------------------+--------------
+ SOFT HOST CTRL   |  0x000011
+------------------+--------------
+       GPIO       |  0x000002
+------------------+--------------
+ GPIO with SM	  |  0x010002
+------------------+--------------
+        ADC	  |  0x000003
+------------------+--------------
+ ADC  with SM	  |  0x010003
+------------------+--------------
+        DAC       |  0x000004
+------------------+--------------
+ DAC with SM	  |  0x010004
+------------------+--------------
+        PWM	  |  0x000005
+------------------+--------------
+ PWM with SM      |  0x010005
+------------------+--------------
+GRAPHIC DISPLAY   |  0x000006
+------------------+--------------
+GRAPHIC DISP. w SM|  0x010006
+------------------+--------------
+TEXT DISPLAY      |  0x000007
+------------------+--------------
+TEXT DISP. w SM   |  0x010007
+------------------+--------------
+I2C CONTROLLER    |  0x000008
+------------------+--------------
+I2C CTRL w SM     |  0x010008
+------------------+--------------
+SPI CONTROLLER    |  0x000009
+------------------+--------------
+SPI CTRL w SM     |  0x010009
+------------------+--------------
+WIRE IRQ CTRL     |  0x00000a
+------------------+--------------
+COMPANION	  |  0x00000b
+------------------+--------------
+SHIELD            |  0x00000c
+------------------+--------------
+
+Class ids with bit 16 set imply support for spontaneous messages (w SM).
+
+A standard memory map shall be defined for each of the classes (see the
+maps directory). Software aboard the mcu should preferably comply to the
+standard map, but if that is not possible, exceptions shall be handled via
+the vendor/device id mechanism.
+
+HOST CONTROLLER devices are special: they are mcuio devices, but actually
+live on the MPU. An host controller is always device 0, function 0 on its
+bus and it is responsible of enumerating connected devices.
+
+
+*** SPONTANEOUS MESSAGES FROM THE MCU ***
+
+In principle the protocol has a peer-to-peer structure. This allows the MCU
+to notify the MPU about meaningful events (such as GPIOs status changes, for
+instance).
+
+** COMPANION DEVICES
+
+For each fn device found on the MCU, the MPU host controller instantiates
+a "soft" fm device on the MPU itself (from here on called fn's companion
+device).
+
++------------------------------+       +---------------------------+
+| MPU			       |       | MCU                       |
+|       +-----+                |       |        +-----+            |
+|       | fn  |      	 write request |        | fn  |            |
+|	| drv |     +---------------------------| dev |            |
+|	|     |-+   |	       |       |        |     |            |
+|	+-----+	|<--+	       |       |        +-----+            |
+|	  | fm  |	       |       |			   |
+|	  | dev |	       |       |			   |
+|         +-----+	       |       |			   |
++------------------------------+       +---------------------------+
+
+
+The fn driver is told by the host controller about fn's companion and asks
+fn to send register updates as write operations to fm.
+
+
+*** INTERRUPT SUPPORT
+
+** WIRE INTERRUPTS
+
+In case spontaneous messages are not supported by the MCU, an irq
+controller function is instantiated on the mcu. Interrupts are triggered
+via a gpio line from the MCU to the MPU, according to the following
+scheme:
+
++------------------------------+       +---------------------------+
+| MPU      +++++++++	       |       | MCU         +----+        |
+|          V	irq+(3)	       |       | 	     | evt|(0)	   |
+|       +-----+    +           |       |        +-----+   |        |
+|       | fn  |    + 	       |       |        | fn  |   V        |
+|	| drv | +-----+        |       |        | dev | +-----+    |
+|	|     | | IRQ |	       |       |        |     | | IRQ |    |
+|	+-----+	| ctrl|	 irq   | gpio  |        +-----+ | ctrl|    |
+|	        | drv |<++++++ |<-----------------------| dev |    |
+|	  	+-----+	 (1)   |       |		+-----+	   |
+|                  |	       |       |	rd stat	   ^	   |
+|		   +---------------------------------------+	   |
+|			       |       |          (2)              |
++------------------------------+       +---------------------------+
+
+
+Step (0): device fn  sends an interrupt request event to the irq controller
+     	  device on the MCU.
+
+Step (1): The MCU's mcuio irq controller sends an interrupt to the MPU by
+     	  asserting a gpio.
+
+Step (2): The mcuio irq controller driver on the MPU receives the interrupt
+          and reads the IRQ controller's device status register.
+
+Step (3): The IRQ ctrl status register is a 32 bits register each bit of which
+          corresponds to one of the MCU's functions. The IRQ controller
+	  driver triggers an interrupt on the MPU for each bit in the
+	  active state.
+
+Each function driver is responsible of clearing the interrupt condition by
+reading the status register of the device it is bound to.
+
+Interrupt support via interrupt controller requires multiplexing many IRQs
+over the same physical line, which in turn requires reading the irq controller's
+status register and doing interrupt demultiplexing on the MPU.
+
+** MESSAGE BASED INTERRUPTS
+
+If the MCU implements spontaneous messages, interrupts can be handled
+in a much faster way.
+
++------------------------------+       +---------------------------+
+| MPU	  +++++++	       |       | MCU                       |
+|         V     +irq (1)       |       | 			   |
+|       +-----+ +  (*)         |       |        +-----+            |
+|       | fn  | +    	 write request |        | fn  |            |
+|	| drv | +     +-------------------------| dev |            |
+|	|     |---+   |	 to 0x1XXX     |        |     |            |
+|	+-----+	  |<--+	   (0) |       |        +-----+            |
+|	    | fm  |  (*)       |       |			   |
+|	    | dev |	       |       |			   |
+|           +-----+	       |       |			   |
++------------------------------+       +---------------------------+
+
+(*) write requests are actually intercepted by fm's driver. Similarly,
+the resulting irq is triggered by the same driver.
+
+
+By convention, if bit 12 of the offset in a write request to a companion
+device is set, after updating the device's register's value an irq for
+device fn is triggered on the mpu. This mechanism saves one message over the
+mcuio bus an requires no actual interrupt demuxing on the MPU, thus resulting
+in faster interrupt support.

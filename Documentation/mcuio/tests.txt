@@ -1,0 +1,85 @@
+
+This document describes a useful configuration which can be used with no
+actual MCU hardware. Things can be setup according to the following diagram:
+
+
+       	    	       	  		         MPU
+                                     +------------------------------+
++---------------------+		     |                          US  |
+|                     |   socket     |   [master]        [slave]    |
+| MCU simulator on PC |<--------------->/dev/ptsX       /dev/ptsY   |
+|                     |              | 	    |              ^	    |
++---------------------+              |      |              |        |
+                                     |      |              |        |
+                                     +======V==============|========+
+				     |    +--------------------+
+				     |	  |   mcuio-hc-ldisc   |    |
+				     |    +--------------------+    |
+				     |                          KS  |
+				     +------------------------------+
+
+US             = User Space
+KS             = Kernel Space
+mcuio-hc-ldisc = module implementing the line discipline based mcuio
+                 host controller
+
+
+The mcuio protocol has been implemented as a single UNIX process using a
+slightly modified version of the bathos operating system (see
+ git@gitorious.org:rubi/bathos.git for the original version).
+
+/dev/ptsX and /dev/ptsY are respectively the master and slave side of a
+pseudo-terminal. A process (not shown in the picture) sets the slave discipline
+on /dev/ptsY via TIOCSETD and keeps the terminal open:
+
+int main(int argc, char *argv[])
+{
+        int d = 29;
+        int fd = open(argv[1], O_RDONLY);
+
+        if (fd < 0) {
+                perror("open");
+                exit(1);
+        }
+        if (ioctl(fd, TIOCSETD, &d) < 0) {
+                perror("TIOCSETD");
+                exit(2);
+        }
+        while(1)
+                sleep(10);
+}
+
+Here's some command line doing the trick:
+
+# Run this on the MCU simulator machine
+# Setup a tcp server on port 10000. When a connection with the client is
+# established, the server connects the resulting socket with file descriptors
+# 3 and 4, and finally executes bathos.
+socat TCP4-LISTEN:10000 EXEC:/home/develop/bathos/bathos,fdin=3,fdout=4
+
+# Run this on the MPU (tested on the yun board, linux-3.8.3)
+# Load the mcuio modules
+/sbin/insmod mcuio.ko
+/sbin/insmod mcuio-hc-dev.ko
+/sbin/insmod mcuio-soft-hc.ko
+/sbin/insmod mcuio-hc-drv.ko
+/sbin/insmod mcuio-hc-ldisc.ko
+# Allocate a pseudotty pair, connect to the server socket running on the MCU
+# simulator and run set_ldisc on the slave side of the pseudoterminal
+socat  -s -x PTY,link=/tmp/spty TCP4:192.168.1.1:10000 & \
+       set_ldisc $(readlink /tmp/spty)
+
+
+A dummy (zero) function device has been implemented on the mcu simulator, so
+that the resulting devices under the MPU are:
+
+root@dello:/sys/bus/mcuio# ls /sys/bus/mcuio/devices/
+0:0.0  0:1.0
+
+Where 0:0.0 is the line discipline host controller and 0:1.0 is the dummy
+device on the mcu:
+
+root@dello:/sys/bus/mcuio# cat devices/0\:1.0/device 
+0xdead
+root@dello:/sys/bus/mcuio# cat devices/0\:1.0/vendor 
+0xbeef

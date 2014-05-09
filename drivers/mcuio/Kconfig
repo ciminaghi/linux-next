@@ -6,3 +6,11 @@ menuconfig MCUIO
 	  (MPU = MicroProcessor Unit) control an MCU's peripherals
 	  (MCU = Micro Controller Unit, some kind of tiny microcontroller
 	  running a tiny OS or no OS at all).
+
+config MCUIO_LDISC_HC
+	tristate "mcuio line discipline host controller"
+	depends on MCUIO
+	default y
+	help
+	  This adds a line-discipline based MCUIO host controller, which is
+	  the only host controller at present. Say Y if in doubt.

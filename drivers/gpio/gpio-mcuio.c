@@ -32,6 +32,7 @@ struct mcuio_gpio {
 	struct irq_chip		irqchip;
 	int			irq_base;
 	u32			out[2];
+	char			label[20];
 };
 
 static int mcuio_gpio_get(struct gpio_chip *chip, unsigned offset)
@@ -220,6 +221,7 @@ static int mcuio_gpio_probe(struct mcuio_device *mdev)
 	struct mcuio_gpio *g;
 	struct regmap *map;
 	unsigned int ngpios;
+	char *names, **names_ptr;
 	int i, ret;
 	struct mcuio_device *hc = to_mcuio_dev(mdev->dev.parent);
 
@@ -260,6 +262,30 @@ static int mcuio_gpio_probe(struct mcuio_device *mdev)
 	regmap_read(map, 0x914, &g->out[1]);
 	pr_debug("%s: initial state = 0x%08x-0x%08x\n", __func__, g->out[0],
 		 g->out[1]);
+	snprintf(g->label, sizeof(g->label), "mcuio-%u:%u.%u", mdev->bus,
+		 mdev->device, mdev->fn);
+
+	/*
+	 * Get 8 bytes per gpio label. Labels are actually 4 bytes long, plus
+	 * a terminator
+	 */
+	names = devm_kzalloc(&mdev->dev, 8 * g->chip.ngpio, GFP_KERNEL);
+	if (!names) {
+		dev_err(&mdev->dev, "no memory for gpio names\n");
+		return -ENOMEM;
+	}
+	names_ptr = devm_kzalloc(&mdev->dev, g->chip.ngpio * sizeof(char *),
+				 GFP_KERNEL);
+	if (!names_ptr) {
+		dev_err(&mdev->dev, "no memory for gpio names ptrs array\n");
+		return -ENOMEM;
+	}
+	for (i = 0; i < g->chip.ngpio; i++) {
+		regmap_read(map, 0x10 + i*4, (u32 *)&names[i*8]);
+		dev_dbg(&mdev->dev, "found gpio %s\n", &names[i*8]);
+		names_ptr[i] = &names[i*8];
+	}
+	g->chip.names = (const char *const *)names_ptr;
 
 	pr_debug("%s: max gpios = %d\n", __func__, ARCH_NR_GPIOS);
 	ret = gpiochip_add(&g->chip);

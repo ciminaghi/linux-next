@@ -26,6 +26,9 @@
 
 #include "mcuio-internal.h"
 
+/* Max number of read descr timeout before skipping to next device */
+#define MAX_ENUM_RETRIES 2
+
 struct mcuio_request;
 
 typedef void (*___request_cb)(struct mcuio_request *);
@@ -521,8 +524,21 @@ static void __register_device(struct mcuio_request *r)
 	}
 }
 
-static int __next_enum(unsigned *edev, unsigned *efunc)
+static int __next_enum(unsigned *edev, unsigned *efunc, int *retry)
 {
+	if ((*retry) > 0) {
+		/* Doing retries */
+		(*retry)--;
+		return 0;
+	}
+	if (!(*retry)) {
+		/* No reply and no more attempts left, skip to next device */
+		*retry = -1;
+		if ((*edev)++ >= MCUIO_DEVS_PER_BUS - 1)
+			return 1;
+		*efunc = 0;
+		return 0;
+	}
 	if ((*efunc)++ >= MCUIO_FUNCS_PER_DEV - 1) {
 		*efunc = 0;
 		if ((*edev)++ >= MCUIO_DEVS_PER_BUS - 1)
@@ -538,10 +554,10 @@ static void __do_enum(struct kthread_work *work)
 	struct mcuio_device *mdev = data->mdev;
 	struct mcuio_request *r = NULL;
 	unsigned edev, efunc;
-	int stop_enum, stat;
+	int stop_enum, stat, retry = -1;
 
 	for (edev = 1, efunc = 0, stop_enum = 0; !stop_enum;
-	     stop_enum = __next_enum(&edev, &efunc)) {
+	     stop_enum = __next_enum(&edev, &efunc, &retry)) {
 		stat = __do_one_enum(mdev, edev, efunc, &r);
 		if (stat < 0) {
 			if (!r)
@@ -550,8 +566,14 @@ static void __do_enum(struct kthread_work *work)
 				"error %d on enum of %u.%u\n",
 				r->status == -ETIMEDOUT ? r->status :
 				r->data[0], edev, efunc);
+			if (r->status == -ETIMEDOUT) {
+				/* No reply from target */
+				retry = retry == -1 ? MAX_ENUM_RETRIES :
+					retry - 1;
+			}
 			continue;
 		}
+		retry = -1;
 		/* Found a new device, let's add it */
 		__register_device(r);
 	}

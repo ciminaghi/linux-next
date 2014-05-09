@@ -18,6 +18,8 @@
 #include <linux/regmap.h>
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
+#include <linux/irq.h>
+#include <linux/interrupt.h>
 #include <linux/gpio.h>
 
 #include <linux/mcuio.h>
@@ -27,6 +29,8 @@
 struct mcuio_gpio {
 	struct regmap		*map;
 	struct gpio_chip	chip;
+	struct irq_chip		irqchip;
+	int			irq_base;
 	u32			out[2];
 };
 
@@ -116,6 +120,13 @@ static int mcuio_gpio_output(struct gpio_chip *chip, unsigned offset, int value)
 	return regmap_write(map, curr_addr, curr);
 }
 
+static int mcuio_gpio_to_irq(struct gpio_chip *chip, unsigned offset)
+{
+	struct mcuio_gpio *gpio = container_of(chip, struct mcuio_gpio, chip);
+	return gpio->irq_base > 0 ? gpio->irq_base + offset : -ENXIO;
+}
+
+
 static const struct regmap_config mcuio_gpio_regmap_config = {
 	.reg_bits = 32,
 	.val_bits = 32,
@@ -123,12 +134,93 @@ static const struct regmap_config mcuio_gpio_regmap_config = {
 	.cache_type = REGCACHE_NONE,
 };
 
+static irqreturn_t mcuio_gpio_irq_handler(int irq, void *devid)
+{
+	int i, stat;
+	/* read events status */
+	uint32_t status[2];
+	struct mcuio_gpio *gpio = devid;
+	struct regmap *map = gpio->map;
+
+	/* mask __before__ reading status */
+	pr_debug("%s entered\n", __func__);
+
+	pr_debug("%s: reading status[0]\n", __func__);
+	stat = regmap_read(map, 0x928, &status[0]);
+	if (stat < 0) {
+		dev_err(gpio->chip.dev,
+			"%s: error reading gpio status[0]\n", __func__);
+		goto end;
+	}
+	pr_debug("%s: reading status[1]\n", __func__);
+	stat = regmap_read(map, 0x92c, &status[1]);
+	if (stat < 0) {
+		dev_err(gpio->chip.dev,
+			"%s: error reading gpio status[1]\n", __func__);
+		goto end;
+	}
+	for (i = 0; i < gpio->chip.ngpio; i++)
+		if (test_bit(i, (unsigned long *)status)) {
+			pr_debug("%s: invoking handler for irq %d\n",
+				 __func__, gpio->irq_base + i);
+			handle_nested_irq(gpio->irq_base + i);
+		}
+end:
+	pr_debug("leaving %s\n", __func__);
+	return IRQ_HANDLED;
+}
+
+static int __mcuio_gpio_set_irq_flags(struct irq_data *d, u8 flags, u8 mask)
+{
+	struct mcuio_gpio *g = irq_data_get_irq_chip_data(d);
+	unsigned gpio = d->irq - g->irq_base;
+	struct regmap *map = g->map;
+	u32 s;
+	unsigned addr = gpio + 0x710;
+	int shift = (8 * (addr % sizeof(u32))), ret;
+
+	ret = regmap_read(map, (addr / sizeof(u32)) * sizeof(u32), &s);
+	if (ret < 0) {
+		dev_err(g->chip.dev, "could not read curr evts flags\n");
+		return ret;
+	}
+	s &= ~(((u32)mask) << shift);
+	ret = regmap_write(map, (addr / sizeof(u32)) * sizeof(u32),
+			   s | ((u32)flags) << shift);
+	if (ret < 0)
+		dev_err(g->chip.dev, "could not set new evts flags\n");
+	return ret < 0 ? ret : 0;
+}
+
+static void mcuio_gpio_irq_unmask(struct irq_data *d)
+{
+	(void)__mcuio_gpio_set_irq_flags(d, 0x80, 0x80);
+}
+
+static void mcuio_gpio_irq_mask(struct irq_data *d)
+{
+	(void)__mcuio_gpio_set_irq_flags(d, 0x00, 0x80);
+}
+
+static int mcuio_gpio_irq_set_type(struct irq_data *d, unsigned int flow_type)
+{
+	u8 v = 0;
+	unsigned int t = flow_type & IRQF_TRIGGER_MASK;
+	if ((t & IRQF_TRIGGER_HIGH) || (t & IRQF_TRIGGER_LOW))
+		return -EINVAL;
+	if (t & IRQF_TRIGGER_RISING)
+		v |= 1;
+	if (t & IRQF_TRIGGER_FALLING)
+		v |= 2;
+	return __mcuio_gpio_set_irq_flags(d, v, 0x7f);
+}
+
 static int mcuio_gpio_probe(struct mcuio_device *mdev)
 {
 	struct mcuio_gpio *g;
 	struct regmap *map;
 	unsigned int ngpios;
-	int ret;
+	int i, ret;
 	struct mcuio_device *hc = to_mcuio_dev(mdev->dev.parent);
 
 	if (!hc) {
@@ -159,7 +251,11 @@ static int mcuio_gpio_probe(struct mcuio_device *mdev)
 	g->chip.set			= mcuio_gpio_set;
 	g->chip.direction_input		= mcuio_gpio_input;
 	g->chip.direction_output	= mcuio_gpio_output;
+	g->chip.to_irq			= mcuio_gpio_to_irq;
 	g->chip.ngpio			= ngpios;
+	g->irqchip.irq_set_type		= mcuio_gpio_irq_set_type;
+	g->irqchip.irq_mask		= mcuio_gpio_irq_mask;
+	g->irqchip.irq_unmask		= mcuio_gpio_irq_unmask;
 	regmap_read(map, 0x910, &g->out[0]);
 	regmap_read(map, 0x914, &g->out[1]);
 	pr_debug("%s: initial state = 0x%08x-0x%08x\n", __func__, g->out[0],
@@ -171,9 +267,33 @@ static int mcuio_gpio_probe(struct mcuio_device *mdev)
 		pr_err("Error %d adding gpiochip\n", ret);
 		return ret;
 	}
+	g->irq_base = irq_alloc_descs(-1, 0, g->chip.ngpio, 0);
+	if (g->irq_base < 0) {
+		dev_err(&mdev->dev, "could not allocate irq descriptors\n");
+		return -ENOMEM;
+	}
+	for (i = 0; i < g->chip.ngpio; i++) {
+		int irq = i + g->irq_base;
+		irq_clear_status_flags(irq, IRQ_NOREQUEST);
+		irq_set_chip_data(irq, g);
+		irq_set_chip(irq, &g->irqchip);
+		irq_set_nested_thread(irq, true);
+		irq_set_noprobe(irq);
+	}
+	ret = request_threaded_irq(mdev->irq, NULL, mcuio_gpio_irq_handler,
+				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
+				   "mcuio-gpio", g);
+	if (ret < 0) {
+		dev_err(&mdev->dev, "error requesting mcuio gpio irq\n");
+		goto fail;
+	}
 
 	dev_set_drvdata(&mdev->dev, g);
 	return 0;
+
+fail:
+	irq_free_descs(g->irq_base, g->chip.ngpio);
+	return ret;
 }
 
 static int mcuio_gpio_remove(struct mcuio_device *mdev)
@@ -183,6 +303,8 @@ static int mcuio_gpio_remove(struct mcuio_device *mdev)
 		dev_err(&mdev->dev, "%s: no drvdata", __func__);
 		return -EINVAL;
 	}
+	free_irq(mdev->irq, g);
+	irq_free_descs(g->irq_base, g->chip.ngpio);
 	return gpiochip_remove(&g->chip);
 }
 

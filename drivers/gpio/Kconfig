@@ -188,6 +188,12 @@ config GPIO_MOXART
 	  Select this option to enable GPIO driver for
 	  MOXA ART SoC devices.
 
+config GPIO_MCUIO
+        tristate "MCUIO gpio driver"
+        depends on MCUIO
+	help
+	  This enables an MCUIO driver for MCUIO GPIO devices
+
 config GPIO_MPC5200
 	def_bool y
 	depends on PPC_MPC52xx

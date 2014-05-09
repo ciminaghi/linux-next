@@ -1,5 +1,10 @@
 
-This document describes a useful configuration which can be used with no
+This document describes some tests to check whether the mcuio system is
+alive.
+
+============== TESTS ON SIMULATED HW ===============
+
+First, let's see a useful configuration which can be used with no
 actual MCU hardware. Things can be setup according to the following diagram:
 
 
@@ -83,3 +88,45 @@ root@dello:/sys/bus/mcuio# cat devices/0\:1.0/device
 0xdead
 root@dello:/sys/bus/mcuio# cat devices/0\:1.0/vendor 
 0xbeef
+
+============== TESTS ON ACTUAL HW ===============
+
+# MPU machine (the mips on yun board):
+# Boot with no serial console (we still use it to talk to the MCU):
+# Activate mcuio mode on bathos (send a CTRL-] via the usb serial interface)
+# Insert modules and set the line discipline on ttyATH0
+/sbin/insmod mcuio.ko
+/sbin/insmod mcuio-hc-dev.ko
+/sbin/insmod mcuio-soft-hc.ko
+/sbin/insmod mcuio-hc-drv.ko
+/sbin/insmod mcuio-hc-ldisc.ko
+/sbin/insmod regmap-mcuio.ko
+/sbin/insmod gpio-mcuio.ko
+stty 230400 < /dev/ttyATH0
+# Actual baud rate is 250000, the mips kernel will turn 230400 into 250000
+stty raw -echo 230400 < /dev/ttyATH0
+# Start the line discipline host controller
+set_ldisc /dev/ttyATH0
+
+# On a second terminal
+# MCU GPIOS are registered starting from 100. On yun gpio114 corresponds to D4,
+# while gpio115 corresponds to TXLED
+# Connect D4 to TXLED somehow (a wire or a resistor should be ok).
+# Export gpio114 and gpio115
+echo 114 > /sys/class/gpio/export
+echo 115 > /sys/class/gpio/export
+# Set D4 as output and TXLED as input
+echo out > /sys/class/gpio/gpio114/direction
+echo in > /sys/class/gpio/gpio115/direction
+# Turn D4 ON
+echo 1 > /sys/class/gpio/gpio114/value
+# The red led on the yun should now be on
+# Read back TXLED
+cat /sys/class/gpio/gpio115/value
+1
+# Turn D4 OFF
+echo 0 > /sys/class/gpio/gpio114/value
+# The red led on the yun should now be off
+# Read back TXLED
+cat /sys/class/gpio/gpio115/value
+0

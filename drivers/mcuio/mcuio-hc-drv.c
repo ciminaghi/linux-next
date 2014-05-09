@@ -33,12 +33,19 @@ struct mcuio_request;
 
 typedef void (*___request_cb)(struct mcuio_request *);
 
+struct mcuio_deferred_register_element {
+	struct mcuio_request r;
+	struct list_head list;
+};
+
 /* Host controller data */
 struct mcuio_hc_data {
 	unsigned bus;
 	struct mutex lock;
 	struct list_head request_queue;
 	struct list_head pending_requests;
+	/* List of descriptors not yet registered */
+	struct list_head to_be_registered;
 	atomic_t removing;
 
 	struct kthread_worker tx_kworker;
@@ -264,6 +271,11 @@ static irqreturn_t hc_irq_handler(int irq, void *__data)
 	return IRQ_HANDLED;
 }
 
+static inline int __is_irq_controller(struct mcuio_func_descriptor *d)
+{
+	return d->rev_class == MCUIO_CLASS_IRQ_CONTROLLER_WIRE;
+}
+
 static inline u32 __get_available(struct regmap *map)
 {
 	u32 out;
@@ -484,8 +496,10 @@ static int __do_one_enum(struct mcuio_device *mdev, unsigned edev,
 
 	r = __make_request(mdev, edev, efunc,
 			   mcuio_type_rddw, 1, 0, NULL);
-	if (!r)
+	if (!r) {
+		*out = NULL;
 		return -ENOMEM;
+	}
 	ret = mcuio_submit_request(r);
 	*out = r;
 	return ret;
@@ -547,18 +561,47 @@ static int __next_enum(unsigned *edev, unsigned *efunc, int *retry)
 	return 0;
 }
 
+static void __register_deferred_devices(struct mcuio_hc_data *data)
+{
+	struct mcuio_deferred_register_element *e, *tmp;
+
+	list_for_each_entry_safe(e, tmp, &data->to_be_registered, list) {
+		struct mcuio_device *hc;
+
+		pr_debug("deferred registering of %u:%u.%u\n",
+			 e->r.mdev->bus, e->r.mdev->device, e->r.mdev->fn);
+		__register_device(&e->r);
+		list_del(&e->list);
+		hc = to_mcuio_dev(e->r.mdev->dev.parent);
+		devm_kfree(&e->r.mdev->dev, e);
+	}
+}
+
 static void __do_enum(struct kthread_work *work)
 {
 	struct mcuio_hc_data *data =
 		container_of(work, struct mcuio_hc_data, do_enum);
 	struct mcuio_device *mdev = data->mdev;
 	struct mcuio_request *r = NULL;
+	struct mcuio_deferred_register_element *e;
 	unsigned edev, efunc;
-	int stop_enum, stat, retry = -1;
+	struct mcuio_func_descriptor *d;
+	int stop_enum, irq_controller_found = 0, stat, retry = -1;
 
 	for (edev = 1, efunc = 0, stop_enum = 0; !stop_enum;
 	     stop_enum = __next_enum(&edev, &efunc, &retry)) {
+		struct mcuio_device *hc;
+
+		if (!efunc) {
+			/* Register any pending devices for current mcu */
+			__register_deferred_devices(data);
+			irq_controller_found = 0;
+		}
 		stat = __do_one_enum(mdev, edev, efunc, &r);
+		if (!r) {
+			dev_err(&mdev->dev, "no request\n");
+			continue;
+		}
 		if (stat < 0) {
 			if (!r)
 				continue;
@@ -574,9 +617,29 @@ static void __do_enum(struct kthread_work *work)
 			continue;
 		}
 		retry = -1;
-		/* Found a new device, let's add it */
-		__register_device(r);
+		/*
+		  Found a new devices, let's add it, but only if an
+		  irq controller has already been found
+		*/
+		d = (struct mcuio_func_descriptor *)&r->data;
+		if (__is_irq_controller(d) || irq_controller_found) {
+			irq_controller_found = 1;
+			__register_device(r);
+			continue;
+		}
+		hc = to_mcuio_dev(r->mdev->dev.parent);
+		e = devm_kzalloc(&hc->dev, sizeof(*e), GFP_KERNEL);
+		if (!e) {
+			WARN_ON(1);
+			continue;
+		}
+		memcpy(&e->r, r, sizeof(*r));
+		list_add_tail(&e->list, &data->to_be_registered);
 	}
+	/*
+	 * Register any remaining pending devices
+	 */
+	__register_deferred_devices(data);
 }
 
 static const struct regmap_config mcuio_hc_regmap_config = {
@@ -634,6 +697,7 @@ static int mcuio_host_controller_probe(struct mcuio_device *mdev)
 	init_kthread_work(&data->send_messages, __send_messages);
 	INIT_LIST_HEAD(&data->request_queue);
 	INIT_LIST_HEAD(&data->pending_requests);
+	INIT_LIST_HEAD(&data->to_be_registered);
 	data->rx_thread = kthread_run(__receive_messages, mdev, "%s_%s",
 				      dev_name(&mdev->dev), "rx");
 	if (IS_ERR(data->rx_thread)) {

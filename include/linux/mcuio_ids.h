@@ -40,6 +40,8 @@
 #define MCUIO_CLASS_SPI_CONTROLLER		0x000009
 /* SPI controller with spontaneous messages support */
 #define MCUIO_CLASS_SPI__CONTROLLER_SM		0x010009
+/* Wire base irq controller */
+#define MCUIO_CLASS_IRQ_CONTROLLER_WIRE		0x00000a
 
 /* Invalid device id (used for id table termination */
 #define MCUIO_NO_DEVICE				0x0000

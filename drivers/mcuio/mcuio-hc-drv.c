@@ -44,6 +44,11 @@ struct mcuio_hc_data {
 
 	struct task_struct *rx_thread;
 	wait_queue_head_t rd_wq;
+
+	struct mcuio_device *mdev;
+	struct kthread_worker enum_kworker;
+	struct task_struct *enum_kworker_task;
+	struct kthread_work do_enum;
 };
 
 typedef int (*mcuio_copy)(uint32_t *dts, const uint32_t *src, int length,
@@ -133,6 +138,28 @@ static int __write_packet(struct regmap *map, const void *src)
 {
 	return regmap_raw_write(map, MCUIO_HC_OUTBUF, src,
 				sizeof(struct mcuio_base_packet));
+}
+
+static struct mcuio_request *__make_request(struct mcuio_device *mdev,
+					    unsigned dev, unsigned func,
+					    unsigned type,
+					    int fill,
+					    unsigned offset, ___request_cb cb)
+{
+	struct mcuio_request *out;
+
+	out = devm_kzalloc(&mdev->dev, sizeof(*out), GFP_KERNEL);
+	if (!out)
+		return NULL;
+	out->extended_data = NULL;
+	out->extended_datalen = 0;
+	out->mdev = mdev;
+	out->type = type;
+	out->offset = offset;
+	out->status = -ETIMEDOUT;
+	out->cb = cb;
+	out->fill = fill;
+	return out;
 }
 
 static int __write_request(struct regmap *map, struct mcuio_request *r)
@@ -446,6 +473,89 @@ static int __mcuio_submit_remote_request(struct mcuio_request *r, void *dummy)
 	return r->status;
 }
 
+static int __do_one_enum(struct mcuio_device *mdev, unsigned edev,
+			 unsigned efunc, struct mcuio_request **out)
+{
+	struct mcuio_request *r;
+	int ret;
+
+	r = __make_request(mdev, edev, efunc,
+			   mcuio_type_rddw, 1, 0, NULL);
+	if (!r)
+		return -ENOMEM;
+	ret = mcuio_submit_request(r);
+	*out = r;
+	return ret;
+}
+
+static void __register_device(struct mcuio_request *r)
+{
+	struct mcuio_func_descriptor d;
+	struct mcuio_device *hc = to_mcuio_dev(r->mdev->dev.parent);
+	struct mcuio_device *new;
+
+	new = kzalloc(sizeof(*new), GFP_KERNEL);
+	if (!new) {
+		dev_err(&hc->dev,
+			"error allocating device %u:%u.%u\n",
+			hc->bus, r->mdev->device, r->mdev->fn);
+		return;
+	}
+	memcpy(&d, r->data, sizeof(d));
+	new->id.device = mcuio_get_device(&d);
+	new->id.vendor = mcuio_get_vendor(&d);
+	new->id.class = d.rev_class;
+	new->id.class_mask = 0xffffffff;
+	new->bus = hc->bus;
+	new->device = r->mdev->device;
+	new->fn = r->mdev->fn;
+	new->do_request = __mcuio_submit_remote_request;
+	new->do_request_data = NULL;
+	pr_debug("%s %d, device = 0x%04x, vendor = 0x%04x, "
+		 "class = 0x%04x\n", __func__, __LINE__, new->id.device,
+		 new->id.vendor, new->id.class);
+	if (mcuio_device_register(new, NULL, &hc->dev) < 0) {
+		dev_err(&hc->dev, "error registering device %u:%u.%u\n",
+			hc->bus, r->mdev->device, r->mdev->fn);
+		kfree(new);
+	}
+}
+
+static int __next_enum(unsigned *edev, unsigned *efunc)
+{
+	if ((*efunc)++ >= MCUIO_FUNCS_PER_DEV - 1) {
+		*efunc = 0;
+		if ((*edev)++ >= MCUIO_DEVS_PER_BUS - 1)
+			return 1;
+	}
+	return 0;
+}
+
+static void __do_enum(struct kthread_work *work)
+{
+	struct mcuio_hc_data *data =
+		container_of(work, struct mcuio_hc_data, do_enum);
+	struct mcuio_device *mdev = data->mdev;
+	struct mcuio_request *r = NULL;
+	unsigned edev, efunc;
+	int stop_enum, stat;
+
+	for (edev = 1, efunc = 0, stop_enum = 0; !stop_enum;
+	     stop_enum = __next_enum(&edev, &efunc)) {
+		stat = __do_one_enum(mdev, edev, efunc, &r);
+		if (stat < 0) {
+			if (!r)
+				continue;
+			dev_err(&mdev->dev,
+				"error %d on enum of %u.%u\n",
+				r->status == -ETIMEDOUT ? r->status :
+				r->data[0], edev, efunc);
+			continue;
+		}
+		/* Found a new device, let's add it */
+		__register_device(r);
+	}
+}
 
 static const struct regmap_config mcuio_hc_regmap_config = {
 	.reg_bits = 32,
@@ -475,6 +585,7 @@ static int mcuio_host_controller_probe(struct mcuio_device *mdev)
 	dev_set_drvdata(&mdev->dev, data);
 	atomic_set(&data->removing, 0);
 	mutex_init(&data->lock);
+	data->mdev = mdev;
 	init_kthread_worker(&data->tx_kworker);
 	init_waitqueue_head(&data->rd_wq);
 	ret = regmap_read(map, MCUIO_IRQ, &irq);
@@ -508,7 +619,18 @@ static int mcuio_host_controller_probe(struct mcuio_device *mdev)
 		kthread_stop(data->tx_kworker_task);
 		return PTR_ERR(data->rx_thread);
 	}
-	dev_set_drvdata(&mdev->dev, data);
+	init_kthread_worker(&data->enum_kworker);
+	data->enum_kworker_task = kthread_run(kthread_worker_fn,
+					      &data->enum_kworker,
+					      "%s_%s",
+					      dev_name(&mdev->dev), "enum");
+	if (IS_ERR(data->enum_kworker_task)) {
+		dev_err(&mdev->dev, "failed to create enum task\n");
+		return -ENOMEM;
+	}
+	init_kthread_work(&data->do_enum, __do_enum);
+	/* Immediately start enum */
+	queue_kthread_work(&data->enum_kworker, &data->do_enum);
 	return 0;
 }
 

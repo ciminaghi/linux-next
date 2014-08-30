@@ -56,5 +56,9 @@ void mcuio_del_hc_device(struct device *);
 void mcuio_hc_dev_default_release(struct device *dev);
 
 
+/*
+ * Set irq numbers for a given bus device (MCUIO_FUNCS_PER_DEV functions)
+ */
+int mcuio_hc_set_irqs(struct mcuio_device *hc, unsigned dev, int irqs[]);
 
 #endif /* __HOST_CONTROLLER_H__ */

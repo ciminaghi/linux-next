@@ -59,6 +59,8 @@ struct mcuio_hc_data {
 	struct kthread_worker enum_kworker;
 	struct task_struct *enum_kworker_task;
 	struct kthread_work do_enum;
+
+	int *irqs[MCUIO_DEVS_PER_BUS];
 };
 
 typedef int (*mcuio_copy)(uint32_t *dts, const uint32_t *src, int length,
@@ -488,6 +490,26 @@ static int __mcuio_submit_remote_request(struct mcuio_request *r, void *dummy)
 	return r->status;
 }
 
+int mcuio_hc_set_irqs(struct mcuio_device *hc, unsigned dev, int __irqs[])
+{
+	struct mcuio_hc_data *data = dev_get_drvdata(&hc->dev);
+	int *irqs, size = sizeof(int) * MCUIO_FUNCS_PER_DEV;
+	if (!data) {
+		WARN_ON(1);
+		return -ENODEV;
+	}
+	irqs = devm_kzalloc(&hc->dev, size, GFP_KERNEL);
+	if (!irqs) {
+		dev_err(&hc->dev, "No memory for irqs for %u:%u\n", hc->bus,
+			dev);
+		return -ENOMEM;
+	}
+	memcpy(irqs, __irqs, size);
+	data->irqs[dev] = irqs;
+	return 0;
+}
+EXPORT_SYMBOL(mcuio_hc_set_irqs);
+
 static int __do_one_enum(struct mcuio_device *mdev, unsigned edev,
 			 unsigned efunc, struct mcuio_request **out)
 {
@@ -509,6 +531,7 @@ static void __register_device(struct mcuio_request *r)
 {
 	struct mcuio_func_descriptor d;
 	struct mcuio_device *hc = to_mcuio_dev(r->mdev->dev.parent);
+	struct mcuio_hc_data *data = dev_get_drvdata(&hc->dev);
 	struct mcuio_device *new;
 
 	new = kzalloc(sizeof(*new), GFP_KERNEL);
@@ -528,6 +551,8 @@ static void __register_device(struct mcuio_request *r)
 	new->fn = r->mdev->fn;
 	new->do_request = __mcuio_submit_remote_request;
 	new->do_request_data = NULL;
+	if (data->irqs[r->mdev->device])
+		new->irq = (data->irqs[r->mdev->device])[r->mdev->fn];
 	pr_debug("%s %d, device = 0x%04x, vendor = 0x%04x, "
 		 "class = 0x%04x\n", __func__, __LINE__, new->id.device,
 		 new->id.vendor, new->id.class);

@@ -18,6 +18,7 @@
 #include <linux/mcuio_ids.h>
 #include <linux/mcuio-hc.h>
 #include <linux/mcuio-soft-hc.h>
+#include <linux/mcuio-proto.h>
 #include "mcuio-internal.h"
 
 static struct mcuio_device_id default_hc_id = {
@@ -34,8 +35,53 @@ void mcuio_hc_dev_default_release(struct device *dev)
 }
 EXPORT_SYMBOL(mcuio_hc_dev_default_release);
 
+static ssize_t store_enum(struct device *dev, struct device_attribute *attr,
+			  const char *buf, size_t count)
+{
+	char *sep, *line;
+	struct mcuio_device *mdev = to_mcuio_dev(dev);
+	int ret, err = 0;
+	unsigned long start = 1, end;
+
+	line = kstrdup(buf, GFP_KERNEL);
+	sep = strchr(line, '-');
+	if (sep)
+		*sep = 0;
+	ret = kstrtoul(line, 0, &start);
+	if (ret < 0 || start >= MCUIO_DEVS_PER_BUS || !start)
+		err = 1;
+	if (!sep)
+		end = start;
+	if (sep && !err) {
+		ret = kstrtoul(sep + 1, 0, &end);
+		if (ret < 0 || end >= MCUIO_DEVS_PER_BUS || end < start)
+			err = 1;
+	}
+	kfree(line);
+	if (err) {
+		pr_err("mcuio hc %s: invalid value %s\n", __func__, buf);
+		return -EINVAL;
+	}
+	ret = mcuio_hc_force_enum(mdev, start, end);
+	if (ret < 0)
+		return ret;
+	return count;
+}
+
+static DEVICE_ATTR(enum, 0222, NULL, store_enum);
+
+static struct attribute *hc_attrs[] = {
+	&dev_attr_enum.attr,
+	NULL,
+};
+
+static struct attribute_group mcuio_hc_dev_attr_group = {
+	.attrs = hc_attrs,
+};
+
 static const struct attribute_group *hc_dev_attr_groups[] = {
 	&mcuio_default_dev_attr_group,
+	&mcuio_hc_dev_attr_group,
 	NULL,
 };
 

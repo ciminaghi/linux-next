@@ -59,6 +59,8 @@ struct mcuio_hc_data {
 	struct kthread_worker enum_kworker;
 	struct task_struct *enum_kworker_task;
 	struct kthread_work do_enum;
+	unsigned enum_first_dev;
+	unsigned enum_last_dev;
 
 	int *irqs[MCUIO_DEVS_PER_BUS];
 };
@@ -510,6 +512,17 @@ int mcuio_hc_set_irqs(struct mcuio_device *hc, unsigned dev, int __irqs[])
 }
 EXPORT_SYMBOL(mcuio_hc_set_irqs);
 
+int mcuio_hc_force_enum(struct mcuio_device *hc, unsigned start, unsigned end)
+{
+	struct mcuio_hc_data *data = dev_get_drvdata(&hc->dev);
+
+	data->enum_first_dev = start;
+	data->enum_last_dev = end;
+	queue_kthread_work(&data->enum_kworker, &data->do_enum);
+	return 0;
+}
+EXPORT_SYMBOL(mcuio_hc_force_enum);
+
 static int __do_one_enum(struct mcuio_device *mdev, unsigned edev,
 			 unsigned efunc, struct mcuio_request **out)
 {
@@ -563,7 +576,8 @@ static void __register_device(struct mcuio_request *r)
 	}
 }
 
-static int __next_enum(unsigned *edev, unsigned *efunc, int *retry)
+static int __next_enum(unsigned *edev, unsigned *efunc, int *retry,
+		       unsigned last_dev)
 {
 	if ((*retry) > 0) {
 		/* Doing retries */
@@ -573,14 +587,14 @@ static int __next_enum(unsigned *edev, unsigned *efunc, int *retry)
 	if (!(*retry)) {
 		/* No reply and no more attempts left, skip to next device */
 		*retry = -1;
-		if ((*edev)++ >= MCUIO_DEVS_PER_BUS - 1)
+		if ((*edev)++ >= last_dev)
 			return 1;
 		*efunc = 0;
 		return 0;
 	}
 	if ((*efunc)++ >= MCUIO_FUNCS_PER_DEV - 1) {
 		*efunc = 0;
-		if ((*edev)++ >= MCUIO_DEVS_PER_BUS - 1)
+		if ((*edev)++ >= last_dev)
 			return 1;
 	}
 	return 0;
@@ -613,8 +627,11 @@ static void __do_enum(struct kthread_work *work)
 	struct mcuio_func_descriptor *d;
 	int stop_enum, irq_controller_found = 0, stat, retry = -1;
 
-	for (edev = 1, efunc = 0, stop_enum = 0; !stop_enum;
-	     stop_enum = __next_enum(&edev, &efunc, &retry)) {
+	dev_dbg(&mdev->dev, "starting enum from %u to %u\n",
+		data->enum_first_dev, data->enum_last_dev);
+	for (edev = data->enum_first_dev, efunc = 0, stop_enum = 0; !stop_enum;
+	     stop_enum = __next_enum(&edev, &efunc, &retry,
+				     data->enum_last_dev)) {
 		struct mcuio_device *hc;
 
 		if (!efunc) {
@@ -741,7 +758,7 @@ static int mcuio_host_controller_probe(struct mcuio_device *mdev)
 	}
 	init_kthread_work(&data->do_enum, __do_enum);
 	/* Immediately start enum */
-	queue_kthread_work(&data->enum_kworker, &data->do_enum);
+	mcuio_hc_force_enum(mdev, 1, MCUIO_DEVS_PER_BUS - 1);
 	return 0;
 }
 

@@ -14,4 +14,12 @@ void mcuio_put_bus(unsigned bus);
 int mcuio_hc_force_enum(struct mcuio_device *mdev,
 			unsigned start, unsigned end);
 
+/*
+ * Find an mcuio device: WARNING: gets a reference to the device (if found),
+ * you might need a call to put_device().
+ */
+struct mcuio_device *mcuio_find_device(struct mcuio_device *parent,
+				       unsigned bus, unsigned device,
+				       unsigned fn);
+
 #endif /* __MCUIO_INTERNAL_H__ */

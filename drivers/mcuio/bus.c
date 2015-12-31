@@ -152,3 +152,35 @@ void mcuio_device_unregister(struct mcuio_device *mdev)
 	__mcuio_device_unregister(&mdev->dev, NULL);
 }
 EXPORT_SYMBOL_GPL(mcuio_device_unregister);
+
+struct mcuio_find_data {
+	unsigned bus, device, fn;
+};
+
+static int _find_device_match(struct device *dev, void *_data)
+{
+	struct mcuio_device *mdev = to_mcuio_dev(dev);
+	struct mcuio_find_data *data = _data;
+
+	return (mdev->bus == data->bus &&
+		mdev->device == data->device &&
+		mdev->fn == data->fn);
+}
+
+struct mcuio_device *
+mcuio_find_device(struct mcuio_device *parent,
+		  unsigned bus, unsigned device, unsigned fn)
+{
+	struct mcuio_find_data data = {
+		.bus = bus,
+		.device = device,
+		.fn = fn,
+	};
+	struct device *p = parent ? &parent->dev : &mcuio_bus;
+	struct device *dev = bus_find_device(&mcuio_bus_type, p,
+					     &data, _find_device_match);
+	if (!dev)
+		return NULL;
+	return to_mcuio_dev(dev);
+}
+EXPORT_SYMBOL(mcuio_find_device);

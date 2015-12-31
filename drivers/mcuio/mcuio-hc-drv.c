@@ -545,8 +545,15 @@ static void __register_device(struct mcuio_request *r)
 	struct mcuio_func_descriptor d;
 	struct mcuio_device *hc = to_mcuio_dev(r->mdev->dev.parent);
 	struct mcuio_hc_data *data = dev_get_drvdata(&hc->dev);
-	struct mcuio_device *new;
+	struct mcuio_device *new, *old;
 
+	old = mcuio_find_device(hc, hc->bus, r->mdev->device, r->mdev->fn);
+	if (old) {
+		dev_dbg(&hc->dev, "%s: not registering %s (already there)\n",
+			__func__, dev_name(&old->dev));
+		put_device(&old->dev);
+		return;
+	}
 	new = kzalloc(sizeof(*new), GFP_KERNEL);
 	if (!new) {
 		dev_err(&hc->dev,

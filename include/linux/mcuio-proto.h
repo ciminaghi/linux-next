@@ -13,9 +13,7 @@
 
 #include <stdint.h>
 
-#define BITS_PER_LONG
 #define BIT(a) (1UL << (a))
-#define BIT_MASK(a) (1UL << ((nr) % BITS_PER_LONG))
 
 #if defined _BSD_SOURCE
 #include <endian.h>

@@ -13,6 +13,7 @@
 
 #include <linux/mcuio.h>
 #include <linux/mcuio-proto.h>
+#include <uapi/linux/mcuio-proto.h>
 
 /**
  * mcuio bus context

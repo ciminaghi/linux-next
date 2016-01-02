@@ -21,6 +21,7 @@
 
 #include <linux/mcuio.h>
 #include <linux/mcuio-proto.h>
+#include <uapi/linux/mcuio-proto.h>
 #include <linux/mcuio-hc.h>
 #include <linux/mcuio-soft-hc.h>
 #include "mcuio-internal.h"

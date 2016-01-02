@@ -19,6 +19,7 @@
 #include <linux/mcuio-hc.h>
 #include <linux/mcuio-soft-hc.h>
 #include <linux/mcuio-proto.h>
+#include <uapi/linux/mcuio-proto.h>
 #include "mcuio-internal.h"
 
 static struct mcuio_device_id default_hc_id = {

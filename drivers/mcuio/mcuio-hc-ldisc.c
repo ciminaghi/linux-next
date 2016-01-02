@@ -18,13 +18,9 @@
 #include <uapi/linux/mcuio-proto.h>
 #include <linux/mcuio-hc.h>
 #include <linux/mcuio-soft-hc.h>
+#include <uapi/linux/tty.h>
 
 #include "mcuio-internal.h"
-
-/*
- * FIXME
- */
-#define N_MCUIO 29
 
 struct ldisc_priv_data {
 	struct device *dev;
